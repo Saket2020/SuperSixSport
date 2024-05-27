@@ -1,73 +1,76 @@
+// server.js
 const express = require('express');
+const cors = require('cors');
 const multer = require('multer');
-const csv = require('csv-parser');
-const mongoose = require('mongoose');
+const csvParser = require('csv-parser');
+const { Server } = require('socket.io');
+const http = require('http');
+
 const fs = require('fs');
 
 const app = express();
-const PORT = 5000;
+const server = http.createServer(app);
+const io = new Server(server);
+const mongoose = require('mongoose');
 
-// MongoDB connection
-mongoose.connect('mongodb://localhost:27017/csvdata', { useNewUrlParser: true, useUnifiedTopology: true });
-
-const dataSchema = new mongoose.Schema({
-    CreditScore: Number,
-    CreditLines: Number,
+mongoose.connect('mongodb://localhost:27017/yourdatabase')
+.then(() => {
+    console.log('Connected to MongoDB');
+})
+.catch((err) => {
+    console.error('Error connecting to MongoDB:', err);
 });
 
-const Data = mongoose.model('Data', dataSchema);
 
-// Multer setup for file upload
+
 const upload = multer({ dest: 'uploads/' });
 
-app.use(express.json());
+// Models
+const DataSchema = new mongoose.Schema({
+  email: String,
+  name: String,
+  creditScore: Number,
+  creditLines: Number,
+  maskedPhoneNumber: String
+});
+const Data = mongoose.model('Data', DataSchema);
 
-// Route for uploading CSV
+// Enable CORS for specific origins
+app.use(cors({
+  origin: 'http://localhost:3000', // Allow requests from this origin
+  methods: ['GET', 'POST'], // Allow only GET and POST requests
+  allowedHeaders: ['Content-Type', 'Authorization'], // Allow these headers to be sent
+}));
+
+
 app.post('/upload', upload.single('file'), (req, res) => {
-    const results = [];
-    fs.createReadStream(req.file.path)
-        .pipe(csv())
-        .on('data', (data) => results.push(data))
-        .on('end', () => {
-            Data.insertMany(results)
-                .then(() => {
-                    fs.unlinkSync(req.file.path); // Remove file after processing
-                    res.json({ message: 'File uploaded and data saved!' });
-                })
-                .catch((err) => res.status(500).json({ error: err.message }));
-        });
-});
+  const filePath = req.file.path;
+  const results = [];
 
-// Route for fetching data with pagination
-app.get('/data', async (req, res) => {
-    const { page = 1, limit = 10 } = req.query;
-    try {
-        const data = await Data.find()
-            .limit(limit * 1)
-            .skip((page - 1) * limit)
-            .exec();
-        const count = await Data.countDocuments();
-        res.json({
-            data,
-            totalPages: Math.ceil(count / limit),
-            currentPage: page
-        });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// Route for calculating subscription pricing
-app.post('/calculate', async (req, res) => {
-    const { basePrice, pricePerCreditLine, pricePerCreditScorePoint } = req.body;
-    const data = await Data.find();
-    const results = data.map(entry => {
-        const subscriptionPrice = basePrice + (pricePerCreditLine * entry.CreditLines) + (pricePerCreditScorePoint * entry.CreditScore);
-        return { ...entry._doc, subscriptionPrice };
+  fs.createReadStream(filePath)
+    .pipe(csvParser())
+    .on('data', (data) => results.push(data))
+    .on('end', () => {
+      Data.insertMany(results, (err, docs) => {
+        if (err) return res.status(500).send(err);
+        res.status(200).send(docs);
+      });
     });
-    res.json(results);
+
+  // Emit progress updates to the client
+  io.on('connection', (socket) => {
+    socket.emit('progress', { message: 'File uploaded successfully!' });
+  });
 });
 
-app.listen(PORT, () => {
-    console.log(`Server is running on http://localhost:${PORT}`);
+app.get('/data', async (req, res) => {
+  const { page = 1, limit = 10 } = req.query;
+  const data = await Data.find()
+    .limit(limit * 1)
+    .skip((page - 1) * limit)
+    .exec();
+  res.json(data);
 });
+
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
